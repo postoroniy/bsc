@@ -741,7 +741,10 @@ fixCModuleVerilog n (ss,ts,ps)
            newLeftId   = setInternal $
                          enumId (getIdString i) pos (getPositionLine(pos))
            newLeftKind = foldr (\ a lk -> Kfun KNum lk) KStar actualArgs
-           newLeftSort = TIstruct (SInterface noIfcPragmas) (internalError "procType: tried to access field names")
+           -- Not actually used, but this is what genIfcFieldFN should produce
+           -- when it processes the IfcTRec.
+           newFieldNames = map name flat_fts
+           newLeftSort = TIstruct (SInterface noIfcPragmas) newFieldNames
            newLeftType = TCon (TyCon newLeftId (Just newLeftKind) newLeftSort)
            newType = cTApplys newLeftType actualArgs
            no_rdys = map (\v -> [vf_name v]) (filter (not . (hasReadyFN fs)) fs)
@@ -1402,7 +1405,7 @@ mkNewModDef genIfcMap (def@(CDef i (CQType _ t) dcls), cqt, vtis, vps) =
        -- liftM of the do-block
        to  = cVApply idLiftM [CVar (to_Id tyId), lexp]
        -- let-define the user's module around the expr we just created
-       lte = Cletrec [CLValueSign def []] to
+       lte = Cletseq [CLValueSign def []] to
        -- the clause for the new def we're creating
        cls = CClause (map CPVar vs) [] lte
 

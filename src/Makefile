@@ -16,7 +16,7 @@ TOOLS=$(CC_TOOLS) \
       $(YICES_TOOLS) \
       $(STP_TOOLS) \
 
-GHC_PKGS=regex-compat syb old-time split
+GHC_PKGS=regex-compat syb old-time split strict-concurrency
 
 SUBMODS=vendor/yices/v2.6/yices2
 
@@ -30,8 +30,9 @@ checkghcpkg=$(if $(shell ghc-pkg list --simple-output $(1)),,$(error GHC package
 $(foreach pkg,$(GHC_PKGS),$(call checkghcpkg,$(pkg)))
 
 # Check all submodules are initialized
-in_git_repo=$(shell git rev-parse --is-inside-work-tree 2> /dev/null )
-ifeq ($(in_git_repo),true)
+submodexists=$(shell git submodule status $(1) 2> /dev/null )
+in_git_repo:=$(foreach submod,$(SUBMODS),$(call submodexists,$(submod)))
+ifneq ($(in_git_repo),)
 define SUBMOD_MSG
 Submodule $(1) missing. Initialize with
     git submodule update --init --recursive

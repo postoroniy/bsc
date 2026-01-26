@@ -3039,15 +3039,6 @@ Ensures that variables are declared, etc.
 ==============
 END ASSERTIONS
 
-> cLetRec :: LetFn CExpr
-> cLetRec [] body = body
-> cLetRec defs body = Cletrec defs body
-
-> cLetSeq :: LetFn CExpr
-> cLetSeq [] body = body
-> cLetSeq defs (Cletseq defs' body) = Cletseq (defs ++ defs') body
-> cLetSeq defs body = Cletseq defs body
-
 detect whether assignment is to the fake "uninitialized" value
 
 > getCExprAssignmentType :: CExpr -> AssignmentType
