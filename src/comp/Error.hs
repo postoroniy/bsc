@@ -792,7 +792,7 @@ data ErrMsg =
         | WIncoherentMatch String String
         | WOrphanInst String
         | EModInstWrongArgs [Position]
-        | EAmbiguous [(String, Position, [Doc])]
+        | EAmbiguous [(String, Position, [(String, [Position])])]
         | EAmbiguousExplCtx [Doc] [Doc] Doc
         | EWrongArity
         | EUnknownSize
@@ -805,7 +805,7 @@ data ErrMsg =
         | EPolyField
         | ENotKNum String
         | EBadGenArg String
-        | EBadIfcType String String
+        | EBadIfcType (Maybe String) String
         | EBadForeignIfcType String
         | ENoTypeSign String
         | EStmtContext String
@@ -2084,12 +2084,16 @@ getErrorText (EContextReductionReduces context reduced_contexts positions vps) =
 
 getErrorText (EAmbiguous ambiguous_var_infos) =
     (Type 33, empty,
-     let mkVarMsg (var, var_pos, use_expls) =
+     let infos = map (\(a,b,c) -> (b,c)) ambiguous_var_infos
+         mkExplMsg (str, poss) =
+           s2par (str ++ " in or at the following locations:") $$
+           nest 2 (vcat (map (text . prPosition) poss))
+         mkVarMsg (var_pos, use_expls) =
              s2par ("An ambiguous type was introduced at " ++
                     prPosition var_pos) $$
              s2par ("This type resulted from:") $$
-             nest 2 (vcat use_expls)
-         msgs = map mkVarMsg ambiguous_var_infos
+             nest 2 (vcat (map mkExplMsg use_expls))
+         msgs = map mkVarMsg (nub infos)
      in
          s2par ("There is not enough explicit type information to deduce " ++
                 "the types of all expressions.  Consider adding more type " ++
@@ -2098,7 +2102,7 @@ getErrorText (EAmbiguous ambiguous_var_infos) =
          -- there can be duplicate messages when multiple variables are
          -- introduced at the same place, so use "nub" on the message
          -- (not on the variable list)
-         nest 2 (vcat (nub msgs))
+         nest 2 (vcat msgs)
     )
 getErrorText (EWrongArity) =
     (Type 34, empty, s2par "Clause has wrong number of arguments")
@@ -2120,9 +2124,12 @@ getErrorText (ENotKNum t) =
     (Type 41, empty, s2par ("Only size polymorphism allowed in code generation: " ++ t))
 getErrorText (EBadGenArg i) =
     (Type 42, empty, s2par ("Bad argument in code generation: " ++ ishow i))
-getErrorText (EBadIfcType mod msg) =
+getErrorText (EBadIfcType (Just mod) msg) =
     (Type 43, empty,
      s2par ("Cannot synthesize " ++ quote mod ++ ": " ++ msg))
+getErrorText (EBadIfcType Nothing msg) =
+    (Type 43, empty,
+     s2par ("Cannot synthesize this module or function: " ++ msg))
 getErrorText (ENoTypeSign e) =
     (Type 44, empty, s2par ("Missing or bad type signature for a module: " ++ e))
 getErrorText (EStmtContext c) =

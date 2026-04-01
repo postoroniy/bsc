@@ -20,8 +20,8 @@ import TIMonad
 import TCMisc
 import Unify
 
-import FStringCompat (mkFString)
-import Id(mkId)
+import FStringCompat (FString, mkFString, getFString)
+import Id(Id, mkId)
 import PreIds
 import CSyntax
 import Util(separate, concatMapM, quote, headOrErr, toMaybe, boolCompress)
@@ -39,8 +39,8 @@ import CType(typeclassId, isTNum, getTNum)
 -- a list of the contexts which failed to reduce, this function
 -- returns the list of error messages which should be reported
 --
-handleContextReduction :: Position -> [VPred] -> TI a
-handleContextReduction pos vps =
+handleContextReduction :: Maybe Id -> Position -> [VPred] -> TI a
+handleContextReduction mid pos vps =
     do
        -- We used to remove duplicates:
        --   let vps' = nubVPred vps
@@ -80,15 +80,15 @@ handleContextReduction pos vps =
                      then vps_reduced_nicenames
                      else is_mod_arrow_vps
 
-       emsgs <- mapM (handleContextReduction' pos) err_vps
+       emsgs <- mapM (handleContextReduction' mid pos) err_vps
 
        errs "handleContextReduction" emsgs
 
 -- --------------------
 
 -- This helper function takes one predicate at a time
-handleContextReduction' :: Position -> (VPred, [VPred]) -> TI EMsg
-handleContextReduction' pos
+handleContextReduction' :: Maybe Id -> Position -> (VPred, [VPred]) -> TI EMsg
+handleContextReduction' mid pos
     p@((VPred vpi (PredWithPositions (IsIn c@(Class { name=(CTypeclass cid) }) ts) _)), _)
     | cid == idBitwise =
         case ts of
@@ -165,12 +165,17 @@ handleContextReduction' pos
                         _ -> return $ defaultContextReductionErr pos p
           _ -> internalError("handleContextReduction': " ++
                              "SizedLiteral instance contains wrong number of types")
+    | cid == idWrapField =
+        case ts of
+          [TCon (TyStr name _), t, _] -> return $ handleCtxRedWrapField mid pos p name t
+          _ -> internalError("handleContextReduction': " ++
+                             "WrapField instance contains wrong number of types")
 
 --  | cid == idLiteral =
 --  | cid == idRealLiteral =
 --  | cid == idStringLiteral =
 
-handleContextReduction' pos p =
+handleContextReduction' mid pos p =
     return (defaultContextReductionErr pos p)
 
 -- --------------------
@@ -453,6 +458,21 @@ handleCtxRedPrimPort pos (vp, reduced_ps) userty =
                          (map (pfpString . toPred) reduced_ps)
     in
         (pos, ECtxErrPrimPort (pfpString userty) poss hasVar)
+
+-- --------------------
+
+handleCtxRedWrapField:: Maybe Id -> Position -> (VPred, [VPred]) -> FString -> Type -> EMsg
+handleCtxRedWrapField mid pos (vp, reduced_ps) name userty =
+    (pos, EBadIfcType (fmap pfpString mid) $
+     "The interface method `" ++ getFString name ++
+     "' uses type(s) that are not in the Bits or SplitPorts typeclasses: " ++
+     intercalate ", " (concatMap bitsPredType reduced_ps)
+     )
+    where
+      bitsPredType :: VPred -> [String]
+      bitsPredType (VPred _ (PredWithPositions (IsIn (Class { name=(CTypeclass cid) }) [t, _]) _))
+        | cid == idBits = [pfpString t]
+      bitsPredType _ = []
 
 
 -- ========================================================================
@@ -824,68 +844,50 @@ ambiguousVarsErr pos pairs =
     in
         (pos, EAmbiguous (map mkVarInfo nice_pairs))
 
-mkAmbVarExplanation :: PredWithPositions -> Doc
+mkAmbVarExplanation :: PredWithPositions -> (String, [Position])
 mkAmbVarExplanation (PredWithPositions p@(IsIn c _) poss) =
     let cid = typeclassId $ name c
-        use_poss_doc = nest 2 (vcat (map (text . prPosition) (nub poss)))
-        use_doc
+        use_str
             | cid == idBitwise =
-               s2par ("Bitwise operators" ++
-                      " in or at the following locations:")
+               "Bitwise operators"
             | cid == idBitReduce =
-               s2par ("Bit reduction operator" ++
-                      " in or at the following locations:")
+               "Bit reduction operator"
             | cid == idBits =
-               s2par ("Bits#() proviso introduced" ++
-                      " (for bit vector packing/unpacking)" ++
-                      " in or at the following locations:")
+               ("Bits#() proviso introduced" ++
+                " (for bit vector packing/unpacking)")
             | cid == idBitExtend =
-               s2par ("Bit vector extend or truncate" ++
-                      " in or at the following locations:")
+               "Bit vector extend or truncate"
             | cid == idPrimSelectable =
-               s2par ("Selection with []" ++
-                      " in or at the following locations:")
+               "Selection with []"
             | cid == idPrimIndex =
                -- this shouldn't happen?
                -- unless we change "<<" and "[x:y]" to take index types?
-               s2par ("Indexing into a vector" ++
-                      " in or at the following locations:")
+               "Indexing into a vector"
             | cid == idEq =
-               s2par ("Equality or inequality operator" ++
-                      " in or at the following locations:")
+               "Equality or inequality operator"
             | cid == idLiteral =
-               s2par ("Numeric constant" ++
-                      " in or at the following locations:")
+               "Numeric constant"
             | cid == idSizedLiteral =
-               s2par ("Sized numeric constant" ++
-                      " in or at the following locations:")
+               "Sized numeric constant"
             | cid == idRealLiteral =
-               s2par ("Real numeric constant" ++
-                      " in or at the following locations:")
+               "Real numeric constant"
             | cid == idStringLiteral =
-               s2par ("String constant" ++
-                      " in or at the following locations:")
+               "String constant"
             | cid == idArith =
-               s2par ("Arithmetic operator" ++
-                      " in or at the following locations:")
+               "Arithmetic operator"
             | cid == idOrd =
-               s2par ("Comparison operator" ++
-                      " in or at the following locations:")
+               "Comparison operator"
             | cid == idBounded =
-               s2par ("Use of minBound or maxBound" ++
-                      " in or at the following locations:")
+               "Use of minBound or maxBound"
             | cid == idPrimParam =
-               s2par ("Assignment to an imported module parameter" ++
-                      " in or at the following locations:")
+               "Assignment to an imported module parameter"
             | cid == idPrimPort =
-               s2par ("Assignment to an imported module port" ++
-                      " in or at the following locations:")
+               "Assignment to an imported module port"
             | otherwise =
                -- just display the predicate
-               s2par ("The proviso " ++ pfpString p ++ " introduced" ++
-                      " in or at the following locations:")
+               ("The proviso " ++ pfpString p ++ " introduced")
     in
-        use_doc $$ use_poss_doc
+        (use_str, nub poss)
 
 
 -- ========================================================================
@@ -1016,7 +1018,7 @@ earlyContextReduction pos ps =
     rs <- mapM try_pred ps
     let err_preds = map fst (filter (not . snd) rs)
     when (not (null err_preds)) $
-        handleContextReduction pos err_preds
+        handleContextReduction Nothing pos err_preds
 
 -- ========================================================================
 
