@@ -15,9 +15,9 @@ module ISyntax(
         IAbstractInput(..),
         IStateVar(..),
         PortTypeMap,
-        IClock,
-        IReset,
-        IInout,
+        IClock(..),
+        IReset(..),
+        IInout(..),
         ILazyArray,
         ArrayCell(..),
         Pred(..),
@@ -92,7 +92,7 @@ import Eval
 import Id
 import Wires(ResetId, ClockDomain, ClockId, noClockId, noResetId, noDefaultClockId, noDefaultResetId, WireProps)
 import IdPrint
-import PreIds(idSizeOf, idId, idBind, idReturn, idPack, idUnpack, idMonad, idLiftModule, idBit, idFromInteger, idTNumToStr)
+import PreIds(idId, idBind, idReturn, idPack, idUnpack, idMonad, idLiftModule, idBit, idFromInteger, idTNumToStr)
 import Backend
 import Prim(PrimOp(..))
 import TypeOps
@@ -401,6 +401,10 @@ checkRUnionAttributes (IRules sps1 rs1) (IRules sps2 rs2) =
         (msgs, sps')
 
 
+-- This function just handles special built-in type functions like TAdd and Id__,
+-- would be nice to get rid of it if we can make those work via preds, as with
+-- user-defined type functions, but that seems hard because we still need to
+-- permit them in instance heads.
 normITAp :: IType -> IType -> IType
 normITAp (ITAp (ITCon op _ _) (ITNum x)) (ITNum y) | isJust (res) =
     mkNumConT (fromJust res)
@@ -413,12 +417,6 @@ normITAp (ITAp (ITCon op _ _) (ITStr x)) (ITStr y) | isJust (res) =
   where res = opStrT op [x, y]
 normITAp (ITCon op _ _) (ITNum x) | op == idTNumToStr =
     ITStr (mkNumFString x)
-
-normITAp f@(ITCon op _ _) a | op == idSizeOf && notVar a =
-        -- trace ("normITAp: " ++ ppReadable (ITAp f a)) $
-           ITAp f a
-  where notVar (ITVar _) = False
-        notVar _ = True
 
 normITAp f@(ITCon op _ _) a | op == idId = a
 

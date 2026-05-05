@@ -18,9 +18,10 @@ module IExpandUtils(
         addSubmodComments, {-getSubmodComments,-}
         addPort, getPortWires, savePortType,
         saveRules, getSavedRules, clearSavedRules, replaceSavedRules,
-        setBackendSpecific, cacheDef,
+        setBackendSpecific, cacheDef, lookupCExprCache, insertCExprCache,
         addStateVar, step, updHeap, getHeap, {- filterHeapPtrs, -}
         getSymTab, getDefEnv, getFlags, getCross, getErrHandle, getModuleName,
+        getTypeNormalizer, getTypeNormalizerC, fullTypeNormalizer,
         getNewRuleSuffix, updNewRuleSuffix,
         mapPExprPosition,
         chkClockDomain, chkResetDomain, fixupActionWireSet,
@@ -91,11 +92,12 @@ import PreStrings(s_unnamed)
 import FStringCompat
 import Id
 import PreIds
+import CSyntax(CExpr)
 import CType(TISort(..), StructSubType(..))
+import IConv(iConvT)
 import VModInfo
 import ISyntax
 import ISyntaxUtil
-import ISyntaxCheck(iGetKind)
 import Prim
 import Wires
 import IWireSet
@@ -103,6 +105,7 @@ import Pragma(PProp(..), SPIdMap, substSchedPragmaIds,
               extractSchedPragmaIds, removeSchedPragmaIds)
 import Util
 import Verilog(vKeywords, vIsValidIdent)
+import Changed
 
 import IOUtil(progArgs)
 import ISyntaxXRef(mapIExprPosition, mapIExprPosition2)
@@ -135,8 +138,8 @@ doTraceHeap2 :: Bool
 doTraceHeap2 = length (filter (== "-trace-heap") progArgs) > 1
 doTraceHeapAlloc :: Bool
 doTraceHeapAlloc = elem "-trace-heap-alloc" progArgs
-doTraceCache :: Bool
-doTraceCache = elem "-trace-def-cache" progArgs
+doTraceDefCache :: Bool
+doTraceDefCache = elem "-trace-def-cache" progArgs
 doTraceClock :: Bool
 doTraceClock = elem "-trace-clock" progArgs
 doDebugFreeVars :: Bool
@@ -342,6 +345,8 @@ canLiftCond'_List m es =
 
 
 -- Test if a type is allowed in the residual program.
+-- Note that this is only used by walkNF in IExpand;
+-- all residual type functions should be normalized at this point.
 
 isPrimType :: IType -> Bool
 -- Primitive interfaces
@@ -359,7 +364,8 @@ isPrimType (ITCon i _ _) = i == idPrimAction ||
                            i == idClock ||
                            i == idReset
 -- Primitive constructor applied to numeric type(s)
-isPrimType (ITAp a t) | iGetKind t == Just IKNum = isPrimTAp a
+-- We normalize types so no unresolved numeric types should escape elaboration.
+isPrimType (ITAp a (ITNum _)) = isPrimTAp a
 -- Primitive arrays
 isPrimType (ITAp (ITCon i _ _) elem_ty) | i == idPrimArray = isPrimType elem_ty
 isPrimType _ = False
@@ -370,7 +376,8 @@ isPrimTAp (ITCon _ _ (TIstruct SInterface{} _)) = True
 isPrimTAp (ITCon i _ _) = i == idActionValue_ ||
                           i == idBit ||
                           i == idInout_
-isPrimTAp (ITAp a t) | iGetKind t == Just IKNum = isPrimTAp a
+-- Again, no unresolved numeric types should escape elaboration.
+isPrimTAp (ITAp a (ITNum _)) = isPrimTAp a
 isPrimTAp _ = False
 
 isParamOnlyType :: IType -> Bool
@@ -568,6 +575,9 @@ data GState = GState {
         -- cache partially-evaluated top-level definitions
         defCache :: !(M.Map Id HExpr),
 
+        -- cache dynamically evaluated CSyntax expressions
+        cexprCache :: !(M.Map (CExpr, IType) HExpr),
+
         -- used for moduleFix
         savedRules :: !RulesBlobs,
 
@@ -629,6 +639,7 @@ initGState errh flags symt alldefs defId is_noinlined_func pps =
                       port_wires = M.empty,
                       backend_specific = False,
                       defCache = M.empty,
+                      cexprCache = M.empty,
                       savedRules = [],
                       badEvaluation = False,
                       aggressive_cond = aggImpConds flags
@@ -2512,6 +2523,46 @@ updHeap tag (p, HeapData ref) e = do
    let e' = e { hc_name = best_name }
    deepseq best_name $ liftIO (writeIORef ref e')
 
+-- Type normalization function used in evaluation.
+-- Fully traverse and reduce all type function applications where possible.
+fullTypeNormalizer :: Flags -> SymTab -> IType -> Changed IType
+fullTypeNormalizer _ _ (ITCon _ _ _) = Unchanged
+fullTypeNormalizer _ _ (ITNum _)     = Unchanged
+fullTypeNormalizer _ _ (ITStr _)     = Unchanged
+fullTypeNormalizer _ _ (ITVar _)     = Unchanged
+fullTypeNormalizer flags symt (ITForAll i k t) = changed1 (ITForAll i k) t'
+  where t' = fullTypeNormalizer flags symt t
+fullTypeNormalizer flags symt t@(ITAp _ _)
+    | (f@(ITCon _ _ (TIatf { atf_param_idxs = pIdxs })), as) <- splitITAp t
+    , length as == length pIdxs  -- Only attempt to reduce type functions that are fully applied.
+    , as' <- map (changedOrId $ fullTypeNormalizer flags symt) as
+    , all canNorm as'
+    = Changed $ normTFun $ foldl ITAp f as'
+  where -- iToCT which we use below cannot handle ITVar and ITForAll
+        canNorm (ITVar _)        = False
+        canNorm (ITForAll _ _ _) = False
+        canNorm (ITAp f a)       = canNorm f && canNorm a
+        canNorm _                = True
+        normTFun t =
+          -- calling iConvT does the normalization here.
+          let t' = iConvT flags symt $ iToCT t
+          in case splitITAp t' of
+               ((ITCon _ _ (TIatf {})), _) -> internalError $
+                    "fullTypeNormalizer - unsimplified: " ++ ppReadable (t,t')
+               _ -> t'
+fullTypeNormalizer flags symt (ITAp f a) = changed2 normITAp f a f' a'
+  where f' = fullTypeNormalizer flags symt f
+        a' = fullTypeNormalizer flags symt a
+
+getTypeNormalizerC :: G (IType -> Changed IType)
+getTypeNormalizerC = do
+  flags <- getFlags
+  symt <- getSymTab
+  return $ fullTypeNormalizer flags symt
+
+getTypeNormalizer :: G (IType -> IType)
+getTypeNormalizer = fmap changedOrId getTypeNormalizerC
+
 {-
 filterHeapPtrs :: (HeapCell -> Bool) -> G [HeapPointer]
 filterHeapPtrs accept =
@@ -2703,7 +2754,9 @@ unheapAllNFNoImp e = do
 toHeap :: String -> HExpr -> Maybe Id -> G HExpr
 -- foreign function calls must be forced onto the heap for
 -- proper handling of actionvalues
-toHeap tag e@(ICon i (ICForeign {iConType = t})) cell_name = addHeapUnev tag t e cell_name
+toHeap tag e@(ICon i (ICForeign {iConType = t})) cell_name = do
+  norm <- getTypeNormalizer
+  addHeapUnev tag (norm t) e cell_name
 -- definitions must be heaped for correct handling of actionvalues
 -- a top-level definition should have no free variables by construction
 toHeap tag (ICon i (ICDef t e)) cell_name = do
@@ -2718,7 +2771,8 @@ toHeap tag e cell_name = do
         when (doDebugFreeVars && not (S.null (ftVars e))) $
              internalError ("toHeap: ftv " ++ ppReadable (ftVars e) ++ ppReadable e)
         -- do the real work of adding the cell
-        addHeapUnev tag (iGetType e) e cell_name
+        norm <- getTypeNormalizerC
+        addHeapUnev tag (iGetTypeNorm norm e) e cell_name
 
 -- Used when you absolutely need to get an IRefT back
 -- for arrays
@@ -2729,7 +2783,9 @@ toHeapCon tag (ICon i (ICDef t e)) cell_name = do
   e' <- cacheDef i t e
   toHeapCon tag e' cell_name
 -- heap all other constants
-toHeapCon tag e@(ICon _ _) cell_name = addHeapUnev tag (iGetType e) e cell_name
+toHeapCon tag e@(ICon _ _) cell_name = do
+  norm <- getTypeNormalizerC
+  addHeapUnev tag (iGetTypeNorm norm e) e cell_name
 toHeapCon tag e cell_name = toHeap tag e cell_name
 
 {-# INLINE toHeapWHNF #-}
@@ -2740,13 +2796,19 @@ toHeapWHNF tag (IAps (ICon _ (ICPrim _ PrimWhenPred)) [t] [ICon _ (ICPred _ p), 
            cell_name = do let pe = P p e
                           -- IRefT is not WHNF
                           pe' <- unheap pe
-                          addHeapWHNF tag t pe' cell_name
-toHeapWHNF tag e cell_name = addHeapWHNF tag (iGetType e) (P pTrue e) cell_name
+                          -- The type inside PrimWhenPred may have come from the iGetType
+                          -- call inside pExprToHExpr and not be normalized.
+                          norm <- getTypeNormalizer
+                          addHeapWHNF tag (norm t) pe' cell_name
+toHeapWHNF tag e cell_name = do
+  norm <- getTypeNormalizerC
+  addHeapWHNF tag (iGetTypeNorm norm e) (P pTrue e) cell_name
 
 {-# INLINE toHeapWHNFCon #-}
 toHeapWHNFCon :: String -> HExpr -> Maybe Id -> G HExpr
-toHeapWHNFCon tag e@(ICon _ _) cell_name =
-    addHeapWHNF tag (iGetType e) (P pTrue e) cell_name
+toHeapWHNFCon tag e@(ICon _ _) cell_name = do
+    norm <- getTypeNormalizerC
+    addHeapWHNF tag (iGetTypeNorm norm e) (P pTrue e) cell_name
 toHeapWHNFCon tag e cell_name = toHeapWHNF tag e cell_name
 
 {-# INLINE toHeapWHNFInferName #-}
@@ -2807,16 +2869,29 @@ cacheDef i t e = do
   s <- get
   let m = defCache s
   case (M.lookup i m) of
-    Just e' -> do when doTraceCache $
-                    traceM ("cache hit: " ++ ppReadable (i, e'))
+    Just e' -> do when doTraceDefCache $
+                    traceM ("cache hit: " ++ ppReadable (i, t, e'))
                   return e'
     Nothing -> do e' <- toHeap "cache-def" e (Just i)
                   s <- get
                   let m' = M.insert i e' m
                   put (s { defCache = m' })
-                  when doTraceCache $
-                    traceM ("cache miss: " ++ ppReadable (i, e))
+                  when doTraceDefCache $
+                    traceM ("cache miss: " ++ ppReadable (i, t))
                   return e'
+
+-- caching of dynamically evaluated CSyntax expressions
+lookupCExprCache :: CExpr -> IType -> G (Maybe HExpr)
+lookupCExprCache ce it = do
+  s <- get
+  let m = cexprCache s
+  return $ M.lookup (ce, it) m
+
+insertCExprCache :: CExpr -> IType -> HExpr -> G ()
+insertCExprCache ce it e = do
+  s <- get
+  let m = cexprCache s
+  put $ s { cexprCache = M.insert (ce, it) e m }
 
 -- #############################################################################
 -- #
@@ -3498,6 +3573,8 @@ realPrim _ = False
 stringPrim :: PrimOp -> Bool
 stringPrim PrimStringConcat = True
 stringPrim PrimStringEQ = True
+stringPrim PrimStringLT = True
+stringPrim PrimStringLE = True
 stringPrim PrimStringToInteger = True
 stringPrim PrimStringLength = True
 stringPrim PrimStringSplit = True

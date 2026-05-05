@@ -1,6 +1,6 @@
 package Prelude(
         {-Add(..), Max(..), Log(..),-}
-        Monad(..), MonadFix(..),
+        Functor(..), (<$>), Applicative(..), Monad(..), MonadFix(..),
         Bits(..), Eq(..),
         Literal(..), RealLiteral(..), SizedLiteral(..), StringLiteral(..),
         Ord(..), Bounded(..), Bitwise(..), BitReduction(..), FShow(..), DefaultValue(..),
@@ -97,7 +97,7 @@ package Prelude(
 
         ($), (∘), id, const, constFn, flip, while,
         curry, uncurry, Curry(..), Curry', asTypeOf,
-        liftM, liftM2, bindM,
+        liftM, liftM2, bindM, return,
 
         (<+>), rJoin,
         (<+), (+>), preempts, preempted, rJoinPreempts,
@@ -269,6 +269,11 @@ infixr  0 $
 infixr  0 :=
 infixr  2 ||
 infixr  3 &&
+infixl  4 <$>
+infixl  4 <$
+infixl  4 <*>
+infixl  4 <*
+infixl  4 *>
 infixr  4 |
 infixr  5 &
 infixr  5 ^
@@ -312,19 +317,67 @@ class (Max :: # -> # -> # -> *) a b c | a b -> c where { }
 class (Min :: # -> # -> # -> *) a b c | a b -> c where { }
 -}
 
+--@ \index{Functor@\te{Functor} (type class)}
+--@ \index{fmap@\te{fmap} (\te{Functor} class method)}
+--@ The class of types that can be mapped over. Functors represent computational
+--@ contexts (like \te{List}, \te{Maybe}, etc.) that can have a function applied
+--@ to their contained values while preserving the structure of the context.
+--@ \begin{libverbatim}
+--@ typeclass Functor #(type f);
+--@     function f#(b) fmap(function b fn(a x), f#(a) x);
+--@ endtypeclass
+--@ \end{libverbatim}
+--@ The \te{fmap} function applies a function to the value(s) inside the functor.
+class Functor f where
+  fmap :: (a -> b) -> f a -> f b
+
+  (<$) :: a -> f b -> f a
+  (<$) = fmap ∘ const
+
+-- An infix synonym for fmap, for use in applicative style
+(<$>) :: (Functor f) => (a -> b) -> f a -> f b
+(<$>) = fmap
+
+--@ \index{Applicative@\te{Applicative} (type class)}
+--@ \index{pure@\te{pure} (\te{Applicative} class method)}
+--@ \index{liftA2@\te{liftA2} (\te{Applicative} class method)}
+--@ The class of applicative functors, which extends \te{Functor} with the ability
+--@ to lift pure values into the functor context and to apply functions that are
+--@ themselves in the functor context. This allows combining multiple functor values.
+--@ \begin{libverbatim}
+--@ typeclass Applicative #(type f)
+--@   provisos (Functor#(f));
+--@     function f#(a) pure(a x);
+--@     function f#(c) liftA2(function c fn(a x, b y), f#(a) x, f#(b) y);
+--@ endtypeclass
+--@ \end{libverbatim}
+--@ The \te{pure} function lifts a value into the functor context.
+--@ The \te{liftA2} function lifts a binary function to operate on two functor values.
+class (Functor f) => Applicative f where
+  pure :: a -> f a
+
+  (<*>) :: f (a -> b) -> f a -> f b
+  (<*>) = liftA2 id
+
+  liftA2 :: (a -> b -> c) -> f a -> f b -> f c
+  liftA2 f x y = f <$> x <*> y
+
+  (*>) :: f a -> f b -> f b
+  u *> v = (id <$ u) <*> v
+
+  (<*) :: f a -> f b -> f a
+  u <* v = liftA2 const u v
+
 --@ \index{Monad@\te{Monad} (type class)}
 --@ \index{bind@\te{bind} (\te{Monad} class method)}
---@ \index{return@\te{return} (\te{Monad} class method)}
 --@ Monads are an advanced topic and can be ignored on first reading.
 --@ \begin{libverbatim}
 --@ typeclass Monad #(type m);
 --@     function m#(b) bind(m#(a) x1, function m#(b) x2(a x1));
---@     function m#(a) return(a x1);
 --@ endtypeclass
 --@ \end{libverbatim}
-class Monad m where
+class (Applicative m) => Monad m where
     bind   :: m a -> (a -> m b) -> m b
-    return :: a -> m a
 
 --@ The class of monads that admit recursion (advanced topic; can be ignored on first reading).
 --@ \index{MonadFix@\te{MonadFix} (type class)}
@@ -338,12 +391,6 @@ class Monad m where
 class (Monad m) => MonadFix m where
     mfix :: (a -> m a) -> m a
 
-fmap :: (Monad m) => (a -> b) -> (m a -> m b)
-fmap f xs = do
-        {-# hide #-}
-        _x <- xs
-        return (f _x)
-
 --@ The class of types that can be converted to bit vectors and back.
 --@ \index{Bits@\te{Bits} (type class)}
 --@ \index{pack@\te{pack} (\te{Bits} class method)}
@@ -356,6 +403,7 @@ fmap f xs = do
 --@ endtypeclass
 --@ \end{libverbatim}
 class coherent Bits a n | a -> n where
+    type SizeOf a = n
     pack   :: a -> Bit n
     unpack :: Bit n -> a
 
@@ -745,6 +793,8 @@ class (MonadFix m) => IsModule m c | m -> c where
     liftModule     :: Module a -> m a
     liftModuleOp   :: (Module (c a) -> Module (c b)) -> m a -> m b
 
+-- This sadly can't be defined as an associated type function of a Refl type class,
+-- since we currently require that type functions must be fully applied.
 primitive type Id__ :: * -> *
 
 instance IsModule Module Id__ where
@@ -818,7 +868,7 @@ instance PrimDeepSeqCond (a -> b) where
 -- for each constructor arg, calling primDeepSeqCond (if the type arguments
 -- are known), or primSeqCond (if they are not known) in which case the
 -- correct function is called at elaboation time.
-instance (Generic a r, PrimDeepSeqCond' r) => PrimDeepSeqCond a where
+instance (PrimDeepSeqCond' (Rep a)) => PrimDeepSeqCond a where
   primDeepSeqCond x = primDeepSeqCond' (from x)
 
 class PrimDeepSeqCond' r where
@@ -855,6 +905,33 @@ instance PrimDeepSeqCond' (ConcPrim a) where
 instance PrimDeepSeqCond' (ConcPoly a) where
   primDeepSeqCond' _ = id
 
+instance Functor ActionValue
+  where
+    fmap f (ActionValue x) = ActionValue (\aw ->
+        letseq x1 = x aw
+        in  AVStruct {
+                avValue = f x1.avValue;
+                avAction = x1.avAction;
+                avWorld  = x1.avWorld
+            })
+
+instance Applicative ActionValue
+  where
+    pure x = ActionValue
+               (\aw -> AVStruct { avValue = x;
+                                  avAction = primNoActions;
+                                  avWorld = aw })
+    liftA2 f (ActionValue x) (ActionValue y) = ActionValue (\aw ->
+        letseq x1 = x aw
+               a1  = x1.avAction
+               v1  = x1.avValue
+               aw1 = x1.avWorld
+               y1  = primSeq v1 $ primSeq a1 $ primSeq aw1 $ y aw1
+        in  AVStruct {
+                avValue = f v1 y1.avValue;
+                avAction = primJoinActions a1 y1.avAction;
+                avWorld  = y1.avWorld
+            })
 
 --@ \begin{libverbatim}
 --@ instance Monad #(ActionValue);
@@ -865,10 +942,6 @@ instance PrimDeepSeqCond' (ConcPoly a) where
 -- (possibly making ActionWorld an argument of foreign-function calls)
 instance Monad ActionValue
   where
-    return x = ActionValue
-                 (\aw -> AVStruct { avValue = x;
-                                    avAction = primNoActions;
-                                    avWorld = aw })
     bind (ActionValue x) f = ActionValue (\aw ->
         letseq x1 = x aw
                a   = x1.avAction
@@ -1479,13 +1552,29 @@ data Maybe a = (Invalid, Nothing) | (Valid, Just) a
         deriving (Eq, Bits, FShow, DefaultValue)
 type Perhaps  = Maybe
 
+--X@ The \te{Maybe} type is a functor.
+instance Functor Maybe
+    where
+        fmap _ Nothing  = Nothing
+        fmap f (Just x) = Just (f x)
+
+--X@ The \te{Maybe} type is an applicative functor.
+instance Applicative Maybe
+    where
+        pure = Just
+        (<*>) Nothing _ = Nothing
+        (<*>) (Just _) Nothing = Nothing
+        (<*>) (Just f) (Just x) = Just (f x)
+        liftA2 _ Nothing  _        = Nothing
+        liftA2 _ _        Nothing  = Nothing
+        liftA2 f (Just x) (Just y) = Just (f x y)
+
 --X@ The \te{Maybe} type is a monad.
 --X@ \begin{libverbatim}
 --X@ instance Monad #(Maybe);
 --X@ \end{libverbatim}
 instance Monad Maybe
     where
-        return x = Just x
         bind Nothing  _ = Nothing
         bind (Just x) f = f x
 
@@ -2113,6 +2202,13 @@ instance Eq String
     (==) x y = primChr (primStringEQ x y)
     (/=) x y = primChr (primBNot (primStringEQ x y))
 
+instance Ord String
+  where
+    (<) x y = primChr (primStringLT x y)
+    (<=) x y = primChr (primStringLE x y)
+    (>) x y = primChr (primStringLT y x)
+    (>=) x y = primChr (primStringLE y x)
+
 instance Arith String
   where
     (+) x y  = x +++ y
@@ -2363,13 +2459,24 @@ instance Literal Fmt
 --@ # 1
 primitive type Module :: * -> *
 
+instance Functor Module
+  where
+    fmap f m = do
+        {-# hide #-}
+        _x <- m
+        return (f _x)
+
+instance Applicative Module
+  where
+    pure = primModuleReturn
+    liftA2 = liftM2
+
 --@ \begin{libverbatim}
 --@ instance Monad #(Module);
 --@ \end{libverbatim}
 instance Monad Module
   where
-    return x = primModuleReturn x
-    bind x f = primModuleBind x f
+    bind = primModuleBind
 
 --@ \begin{libverbatim}
 --@ instance MonadFix #(Module);
@@ -2674,6 +2781,17 @@ asTypeOf x _ = x
 liftM :: (Monad m) => (a -> b) -> (m a -> m b)
 liftM f x = x `bind` (\ _y -> return (f _y))
 
+--@ Lift a binary function to operate on monadic values.
+--@ \index{liftM2@\te{liftM2} (Prelude function)}
+--@ \begin{libverbatim}
+--@ function m#(c) liftM2(function c f(a x1, b x2), m#(a) x, m#(b) y)
+--@   provisos (Monad#(m));
+--@ \end{libverbatim}
+--@ Generally, liftA2 should be preferred to liftM2, as it can be used with any
+--@ applicative functor (not just monads), and it may have a more efficient
+--@ implementation for some applicative functors.
+--@ However, liftM2 may be useful to define liftA2 for a Monad that does not
+--@ have a more efficient implementation of liftA2.
 liftM2 :: (Monad m) => (a -> b -> c) -> (m a -> m b -> m c)
 liftM2 f ma mb = do
   {-# hide #-}
@@ -2684,6 +2802,9 @@ liftM2 f ma mb = do
 
 bindM :: (Monad m) => m a -> (a -> m b) -> m b
 bindM = bind
+
+return :: (Monad m) => a -> m a
+return = pure
 
 ---
 
@@ -2798,8 +2919,6 @@ instance Eq Reset
   where
    (==) x y = primChr (primResetEQ x y)
    (/=) x y = primChr (primBNot (primResetEQ x y))
-
-primitive type SizeOf :: * -> #
 
 primitive type TAdd :: # -> # -> #
 primitive type TSub :: # -> # -> #
@@ -2984,6 +3103,8 @@ primitive primExtractInternal :: Bit n -> Bit l -> Bit l -> Bit k
 
 primitive primStringConcat :: String -> String -> String
 primitive primStringEQ :: String -> String -> Bit 1
+primitive primStringLE :: String -> String -> Bit 1
+primitive primStringLT :: String -> String -> Bit 1
 
 primitive primJoinRules :: Rules -> Rules -> Rules
 
@@ -3474,7 +3595,7 @@ instance (TupleSize' a n) => TupleSize a n where {}
 
 class TupleSize' a n | a -> n where {}
 instance TupleSize' a 1 where {}
-instance (TupleSize' b (TSub n 1)) => TupleSize' (a, b) n where {}
+instance (TupleSize' b n) => TupleSize' (a, b) (TAdd n 1) where {}
 
 -- FUNCTIONS TO REPLACE UNAVAILABLE INFIXES
 
@@ -3533,13 +3654,23 @@ instance PrimUpdateable (List a) a
   where
    primUpdateFn = listPrimUpdate
 
+--@ The \te{List} type is a functor.
+instance Functor List
+    where
+        fmap = listPrimMap
+
+--@ The \te{List} type is an applicative functor.
+instance Applicative List
+    where
+        pure x = Cons x Nil
+        liftA2 f xs ys = listPrimConcat (listPrimMap (\x -> listPrimMap (f x) ys) xs)
+
 --@ The \te{List} type is a monad.
 --@ \begin{libverbatim}
 --@ instance Monad #(List);
 --@ \end{libverbatim}
 instance Monad List
     where
-        return x = Cons x Nil
         bind x f = listPrimConcat (listPrimMap f x)
 
 -- copied !! and !!! from List.bs for PrimSelectable instance
@@ -3692,6 +3823,16 @@ arrayLength a =
 
 primArrayNewU :: Integer -> Array a
 primArrayNewU k = primArrayNew k _
+
+instance Functor Array
+  where
+    fmap :: (a -> b) -> Array a -> Array b
+    fmap f v =
+      let buildResult :: Integer -> Array b -> Array b
+          buildResult i arr =
+            if i < 0 then arr
+            else buildResult (i - 1) (primArrayUpdate arr i (f (primArraySelect v i)))
+      in buildResult (primArrayLength v - 1) (primArrayNewU (primArrayLength v))
 
 instance PrimSelectable (Array a) a
   where
@@ -3857,8 +3998,8 @@ instance PrimMakeUninitialized (a -> b) where
    primMakeUninitialized = primMakeRawUninitialized
 
 -- Default generic instance covers data and structs
-instance (Generic a r, PrimMakeUninitialized' a r) => PrimMakeUninitialized a where
-  primMakeUninitialized pos f = primMakeUninitialized' ((error "proxy") :: r) pos f
+instance (PrimMakeUninitialized' a (Rep a)) => PrimMakeUninitialized a where
+  primMakeUninitialized pos f = primMakeUninitialized' ((error "proxy") :: Rep a) pos f
 
 -- Extra intermediate helper type class allows coherent dispatch on number of constructors
 class PrimMakeUninitialized' a r where
@@ -3871,7 +4012,7 @@ class PrimMakeUninitialized' a r where
 -- constructor: a struct value is returned with uninitialized values in its
 -- fields.
 --
-instance (Generic a r, PrimMakeUninitialized'' r) =>
+instance (PrimMakeUninitialized'' (Rep a)) =>
          PrimMakeUninitialized' a (Meta (MetaData n p ta 1) r') where
   primMakeUninitialized' _ pos f = to $ primMakeUninitialized'' False pos f
 
@@ -4006,8 +4147,8 @@ instance PrimMakeUndefined (Array a) where
    primMakeUndefined = primMakeRawUndefined
 
 -- Default generic instance covers data and structs
-instance (Generic a r, PrimMakeUndefined' a r) => PrimMakeUndefined a where
-  primMakeUndefined pos i = primMakeUndefined' ((error "proxy") :: r) pos i
+instance (PrimMakeUndefined' a (Rep a)) => PrimMakeUndefined a where
+  primMakeUndefined pos i = primMakeUndefined' ((error "proxy") :: Rep a) pos i
 
 -- Extra intermediate helper type class allows coherent dispatch on number of constructors
 class PrimMakeUndefined' a r where
@@ -4017,7 +4158,7 @@ class PrimMakeUndefined' a r where
 -- The derived instance for structs is like for data types with a single
 -- constructor: a struct value is returned with undefined values in its
 -- fields.
-instance (Generic a r, PrimMakeUndefined'' r) =>
+instance (PrimMakeUndefined'' (Rep a)) =>
          PrimMakeUndefined' a (Meta (MetaData n p ta 1) r') where
   primMakeUndefined' _ pos i = to $ primMakeUndefined'' pos i
 
@@ -4408,6 +4549,7 @@ instance (Literal t) => DefaultValue t where
 
 -- Representable types of kind *
 class Generic a r | a -> r where
+  type Rep a = r
   from :: a -> r
   to :: r -> a
 

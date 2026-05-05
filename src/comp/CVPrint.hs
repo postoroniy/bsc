@@ -8,6 +8,7 @@ module CVPrint (
         TyCon(..),
         Kind(..),
         CImport(..),
+        CImportedSignature(..),
         CQual(..),
         CClause(..),
         CPat(..),
@@ -41,7 +42,6 @@ module CVPrint (
         getName,
         getLName,
         isTDef,
-        getNK,
         HasPosition(..),
         StructSubType(..),
         pvpId, pvParameterTypes) where
@@ -91,7 +91,7 @@ pvpExports d (Right excludes) = [ text "/* Do not export (unsupported)" ] ++ map
 pvpExports d (Left exports) = map (pp d) exports
 
 instance PVPrint CPackage where
-    pvPrint d _ (CPackage i exps imps fixs def includes) =
+    pvPrint d _ (CPackage i exps imps _impsigs fixs def includes) =
         (t"package" <+> pp d i <> t";") $+$ empty $+$
         pBlockNT d 0 True (pvpExports d exps ++ map (pp d) imps ++ map (pp d) fixs ++ pdefs d def ++ map (pp d) includes) (t"\n") $+$
         (t"endpackage:" <+> pp d i)
@@ -114,6 +114,8 @@ instance PVPrint CExport where
 
 instance PVPrint CImport where
     pvPrint d p (CImpId q i) = t"import" <+> pvpId d i <> t "::*" <> t";" <+> ppQualified q
+
+instance PVPrint CImportedSignature where
     pvPrint d p (CImpSign _ q (CSignature i _ _ _)) = t"import" <+> pvpId d i <> t "::*" <+> t "...;" <+> ppQualified q
 
 instance PVPrint CInclude where
@@ -258,14 +260,15 @@ instance PVPrint CDefn where
 
     pvPrint d p (CValueSign def) = pvPrint d p def
 
-    pvPrint d p (Cclass Nothing ps ik is fd ss) =
+    pvPrint d p (Cclass Nothing ps ik is fd ats ss) =
        ((pBlockNT d 0 False
         [t"typeclass" <+> pp d ik <+> pvParameterTypeVars d is,
          pvpFDs d fd,
          if ps==[]
            then empty
            else t "  provisos (" <> sepList (map (pvPrint d 0) ps) (t",") <> t")"] empty)<> (t";")) $+$
-       pBlockNT d 4 False (map (\s -> ppField d (t"function") True s <> t";") ss) empty $+$
+       pBlockNT d 4 False (map (pvpAssocDepFun d) ats ++
+                            map (\s -> ppField d (t"function") True s <> t";") ss) empty $+$
        t"endtypeclass"
 
     pvPrint d p (Cinstance (CQType ps ty) ds) =
@@ -398,10 +401,15 @@ ppIfcPrags d (Just xs) = if (null filtered) then empty else prt
 
 pvpFDs :: PDetail -> CFunDeps -> Doc
 pvpFDs d [] = empty
-pvpFDs d fd = text "  dependencies" <+> sepList (map (pvpFD d) fd) (t",")
+pvpFDs d fd = text "  dependencies" <+> t"(" <> sepList (map (pvpFD d) fd) (t",") <> t")"
 
 pvpFD :: PDetail -> ([Id], [Id]) -> Doc
-pvpFD d (as,rs) = sep (map (pvpId d) as) <+> t "->" <+> sep (map (pvpId d) rs)
+pvpFD d (as,rs) = sep (map (pvpId d) as) <+> t "determines" <+> sep (map (pvpId d) rs)
+
+pvpAssocDepFun :: PDetail -> CAssocDepFun -> Doc
+pvpAssocDepFun d (CAssocDepFun name ps rhs) =
+    t"type" <+> pvPrint d 0 name <>
+    pvParameterTypeVars d ps <+> t"=" <+> pvpId d rhs <> t";"
 
 {-
 ppFDs d [] = t""
@@ -1253,6 +1261,8 @@ instance PVPrint TISort where
     pvPrint d p (TIdata is enum) = pparen (p>0) $ text (if enum then "TIdata (enum)" else "TIdata") <+> pvPrint d 1 is
     pvPrint d p (TIstruct ss is) = pparen (p>0) $ text "TIstruct" <+> pvPrint d 1 ss <+> pvPrint d 1 is
     pvPrint d p (TIabstract) = text "TIabstract"
+    pvPrint d p (TIatf { atf_class_id = cls, atf_param_idxs = pIdxs }) =
+        pparen (p>0) $ text "TIatf" <+> pvPrint d 0 (length pIdxs) <+> pvPrint d 0 cls
 
 instance PVPrint StructSubType where
     pvPrint _ _ ss = text (show ss)

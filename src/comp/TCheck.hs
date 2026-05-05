@@ -16,7 +16,7 @@ import Util(fst3)
 import IntLit
 import IntegerUtil(mask)
 import Classic(isBSV)
-import Flags(Flags)
+import Flags(Flags, letGen)
 import PFPrint
 import Id
 import FStringCompat
@@ -308,11 +308,14 @@ tiExpr as td exp@(CStruct mb c ies) = do
 tiExpr as td exp@(CStructUpd e []) = tiExpr as td e
 tiExpr as td exp@(CStructUpd e ies@((i,_):_)) = do
     (ps, e') <- tiExpr as td e
+    -- Normalize to expand associated type functions for struct update
+    s_upd <- getSubst
+    td' <- expandFullType (apSub s_upd td)
     -- XXX should use all fields to disambiguate
-    (_, ti, _) <- findFields td i
+    (_, ti, _) <- findFields td' i
     sy <- getSymTab
     case findType sy ti of
-     Just (TypeInfo _ _ _ (TIstruct sst qfs)) | isUpdateable sst -> do
+     Just (TypeInfo _ _ _ (TIstruct sst qfs) _) | isUpdateable sst -> do
         --posCheck "C" e
         x <- newVar (getPosition e) "tiExprCStructUpd"
         let v = CVar x
@@ -2082,7 +2085,11 @@ tiSelect readTag as td e i f = do
                      tiExpr as te e
 
     --do s <- getSubst; trace ("sel1 " ++ ppReadable ((exp, apSub s td), (e, apSub s te), (i, apSub s tf))) $ return ()
-    (i' :>: sc, ti, n)  <- findFields (f te) i
+    -- Normalize the struct type to expand associated type functions
+    -- so that field access works through type function results.
+    s_sel <- getSubst
+    struct_ty <- expandFullType (apSub s_sel (f te))
+    (i' :>: sc, ti, n)  <- findFields struct_ty i
     (qs :=> t, ts)  <- freshInstT "F" i sc tf
     -- do s <- getSubst; trace ("sel2 " ++ ppReadable (exp, apSub s t, apSub s tf)) $ return ()
     case t of
@@ -2114,8 +2121,8 @@ tiField1 as rt (f, e) = do
     -- so replace them with vars and return the preds that determine the vars
     -- XXX disable expanding of type synonyms until failures with TLM
     -- XXX (type synonyms which drop parameters) is resolved
-    -- XXX (tcon_ps, ft) <- expPrimTCons (expandSyn ft0)
-    (tcon_ps, ft) <- expPrimTCons ft0
+    -- XXX (tcon_ps, ft) <- expTFun (expandSyn ft0)
+    (tcon_ps, ft) <- expTFun ft0
     -- Unify the field type and the context expected return type,
     -- possibly returning preds which express type equality
     (t,eq_ps) <- unifyFnTo f e ft rt
@@ -2851,7 +2858,9 @@ tiImpls recursive as ibs = do
 
     s   <- getSubst
 
-    let ps = apSub s (concat pss)
+    let ps0 = apSub s (concat pss)
+    ps <- concatMapM expTConPred ps0
+
     when (not . null $ ps) $ satTraceM ("tiImpls " ++ ppReadable is ++ " ps: " ++ ppReadable ps)
 
     -- try to solve as many constraints as possible,
@@ -2934,11 +2943,15 @@ tiImpls recursive as ibs = do
     -- Apply the substitution to the code fragments
     let altss_final = map (apSub s) altss'          -- new alternatives
 
+    flags <- getFlags
+
     -- Determine the generic variables and produce the inferred type scheme
     let
         -- The generic vars are the local vars (tv of the ts and the rs)
-        -- which are not fixed
-        gs = (lvs_final `union` tv rs_final) \\ fs_final
+        -- which are not fixed; empty when generalization is disabled
+        gs = if letGen flags
+             then (lvs_final `union` tv rs_final) \\ fs_final
+             else []
         -- The inferred type scheme quantified over "gs"
         scs' =
             map (quantify gs . (map toPredWithPositions rs_final :=>)) ts_final
@@ -2961,9 +2974,9 @@ tiImpls recursive as ibs = do
         -- no local constraints, so use bindings as is
         let
             -- Create an explicitly typed definition for a given i
-            -- The generic variables are (tv t \\ fs_final)
+            -- The generic variables are those in t which are generalized
             mkExpl (i,_) t (alts, me) =
-                CLValueSign (CDefT i (tv t \\ fs_final) (CQType [] t) alts) me
+                CLValueSign (CDefT i (filter (`elem` gs) (tv t)) (CQType [] t) alts) me
             defs = zipWith3 mkExpl ibs ts_final altss_final
         in
             -- return the deferred predicates, the assumptions for the
@@ -3189,7 +3202,7 @@ ifcFieldIdToTConId i r t =
     Just ti ->
         case findType r ti of
         -- this pattern requires that the type be an interface
-        Just (TypeInfo _ _ _ (TIstruct (SInterface {}) is)) ->
+        Just (TypeInfo _ _ _ (TIstruct (SInterface {}) is) _) ->
             if (unQualId i) `elem` map unQualId is
                 then Just ti
                 else Nothing
@@ -3208,7 +3221,7 @@ writeableIfc :: Flags -> SymTab -> CType -> Bool
 writeableIfc flags r t
     | Just _ <- isWriteType r t = True
     -- incoherent matches are resolved *after* reducePred
-    | Right (Just _) <- fst $ runTI flags False r checkWriteable = True
+    | (Right (Just _), _, _) <- runTI flags False r checkWriteable = True
     | otherwise = False
   where checkWriteable = do
           wCls <- findCls (CTypeclass idPrimWriteable)
@@ -3219,7 +3232,7 @@ writeableIfc flags r t
 getIfcFields :: Id -> SymTab -> Maybe [Id]
 getIfcFields ti sy =
     case findType sy ti of
-    Just (TypeInfo _ _ _ (TIstruct SInterface{} fs)) -> Just fs
+    Just (TypeInfo _ _ _ (TIstruct SInterface{} fs) _) -> Just fs
     _ -> Nothing
 
 chkSchedInfo :: [Id] -> VSchedInfo -> TI ()

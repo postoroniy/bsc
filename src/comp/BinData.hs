@@ -730,6 +730,7 @@ instance Bin IdProp where
     writeBytes (IdPInlinedPositions poss)
                                   = do putI 35 ; toBin poss
     writeBytes IdPParserGenerated = putI 36
+    writeBytes IdPIncoherent      = putI 37
     readBytes = do
         i <- getI
         case i of
@@ -761,6 +762,7 @@ instance Bin IdProp where
           34 -> return IdPMethodPredicate
           35 -> do poss <- fromBin; return (IdPInlinedPositions poss)
           36 -> return IdPParserGenerated
+          37 -> return IdPIncoherent
           n  -> internalError $ "BinData.Bin(IdProp).readBytes: " ++ show n
 
 
@@ -1310,6 +1312,7 @@ instance Bin TISort where
     writeBytes (TIdata is enum) = do putI 1; toBin is; toBin enum
     writeBytes (TIstruct su is) = do putI 2; toBin su; toBin is
     writeBytes (TIabstract)     = do putI 3
+    writeBytes (TIatf c ps t)   = do putI 4; toBin c; toBin ps; toBin t
     readBytes = do
         i <- getI
         case i of
@@ -1317,6 +1320,8 @@ instance Bin TISort where
           1 -> do is <- fromBin; enum <- fromBin; return (TIdata is enum)
           2 -> do su <- fromBin; is <- fromBin; return (TIstruct su is)
           3 -> return TIabstract
+          4 -> do c <- fromBin; ps <- fromBin; t <- fromBin;
+                  return (TIatf c ps t)
           n -> internalError $ "BinData.Bin(TISort).readBytes: " ++ show n
 
 instance Bin StructSubType where

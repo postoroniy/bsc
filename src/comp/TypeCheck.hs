@@ -29,25 +29,30 @@ import SymTab
 import Assump
 import CSubst(cSubstN)
 import CFreeVars(getFVC, getFTCC)
-import Util(separate, apFst, quote)
+import Util(separate, apFst, quote, fst3)
 
-cTypeCheck :: ErrorHandle -> Flags -> SymTab -> CPackage -> IO (CPackage, Bool)
-cTypeCheck errh flags symtab (CPackage name exports imports fixs defns includes) = do
-    (typecheckedDefns, typeWarns, haveErrors) <- tiDefns errh symtab flags defns
+cTypeCheck :: ErrorHandle -> Flags -> SymTab -> CPackage -> IO (CPackage, Bool, S.Set Id)
+cTypeCheck errh flags symtab (CPackage name exports imports impsigs fixs defns includes) = do
+    (typecheckedDefns, typeWarns, usedPkgs, haveErrors) <- tiDefns errh symtab flags defns
+
+    -- Issue type warnings
     when (not (null typeWarns)) $ bsWarning errh typeWarns
-    return (CPackage name exports imports fixs typecheckedDefns includes,
-            haveErrors)
+
+    return (CPackage name exports imports impsigs fixs typecheckedDefns includes,
+            haveErrors,
+            usedPkgs)
+
 
 -- type check top-level definitions in parallel (since they are independent)
-tiDefns :: ErrorHandle -> SymTab -> Flags -> [CDefn] -> IO ([CDefn], [WMsg], Bool)
+tiDefns :: ErrorHandle -> SymTab -> Flags -> [CDefn] -> IO ([CDefn], [WMsg], S.Set Id, Bool)
 tiDefns errh s flags ds = do
   let ai = allowIncoherentMatches flags
-  let checkDef d = (defErr, snd defTI)
-        where defTI  = runTI flags ai s $ tiOneDef d
-              defErr = case (fst defTI) of
+  let checkDef d = (defErr, warns, usedPkgs)
+        where (result, warns, usedPkgs) = runTI flags ai s $ tiOneDef d
+              defErr = case result of
                           (Left emsgs)  -> Left emsgs
                           (Right cdefn) -> rmFreeTypeVars cdefn
-  let (checks, wss) = unzip (map checkDef ds)
+  let (checks, wss, pkgss) = unzip3 (map checkDef ds)
   let (errors, ds') = apFst concat $ separate checks
   let have_errors = not (null errors)
   let mkErrorDef (Left _)  (CValueSign (CDef i t _)) = Just (mkPoisonedCDefn i t)
@@ -56,14 +61,15 @@ tiDefns errh s flags ds = do
       mkErrorDef (Left _)  d = internalError ("tiDefns - not CValueSign or Cclass: " ++ ppReadable d)
       mkErrorDef (Right _) _ = Nothing
   let error_defs = catMaybes (zipWith mkErrorDef checks ds)
-  let checked_error_defs = map checkDef error_defs
   let (double_error_msgs, error_defs') =
-          apFst concat $ separate $ map fst checked_error_defs
+          apFst concat $ separate $ map fst3 (map checkDef error_defs)
+  -- Accumulate all used packages (only from the first round, poison pills don't use new symbols)
+  let allUsedPkgs = S.unions pkgss
   -- XXX: we give up - some type signatures are bogus
   when ((not (null double_error_msgs)) || (have_errors && not (enablePoisonPills flags))) $
       bsError errh (nub errors) -- the underyling error should be in errors
   when (have_errors && enablePoisonPills flags) $ bsErrorNoExit errh errors
-  return (ds' ++ error_defs', concat wss, have_errors)
+  return (ds' ++ error_defs', concat wss, allUsedPkgs, have_errors)
 
 nullAssump :: [Assump]
 nullAssump = []
@@ -76,7 +82,7 @@ tiOneDef d@(CValueSign (CDef i t s)) = do
         s <- getSubst'
         clearSubst
         return (CValueSign (apSub s d'))
-tiOneDef d@(Cclass incoh cps ik is fd fs) = do
+tiOneDef d@(Cclass incoh cps ik is fd ats fs) = do
     let -- we can assume that the current class is available, so make it
         -- as a pred
         ts :: [CType]
@@ -154,24 +160,24 @@ qualifyClassDefaults errh symt ds =
               Nothing ->
                   -- it could be a struct/interface (or an alias of one?)
                   case (findType symt c) of
-                    Just (TypeInfo (Just qc) _ _ _) -> (c, qc)
+                    Just (TypeInfo (Just qc) _ _ _ _) -> (c, qc)
                     _ -> internalError ("qualifyClassDefaults: " ++
                                         "constructor not found: " ++
                                         ppReadable c)
         mkTQual t =
             case (findType symt t) of
-              Just (TypeInfo (Just qt) _ _ _) -> (t, qt)
-              Just (TypeInfo Nothing _ _ _) ->
+              Just (TypeInfo (Just qt) _ _ _ _) -> (t, qt)
+              Just (TypeInfo Nothing _ _ _ _) ->
                   internalError ("qualifyClassDefaults: " ++
                                  "unexpected numeric or string type: " ++ ppReadable t)
               Nothing -> internalError ("qualifyClassDefaults: " ++
                                         "type not found: " ++ ppReadable t)
         mkVQual v =
             case (findVar symt v) of
-              Just (VarInfo _ (qv :>: _) _) -> (v, CVar qv)
+              Just (VarInfo _ (qv :>: _) _ _) -> (v, CVar qv)
               Nothing -> internalError ("qualifyClassDefaults: " ++
                                         "var not found: " ++ ppReadable v)
-        qualDef (Cclass incoh cps ik is deps fs) =
+        qualDef (Cclass incoh cps ik is deps ats fs) =
             let qualField (CField fi fps fqt fdefaults foqt) =
                     let (csets, vsets) = unzip $ map getFVC fdefaults
                         cset = S.unions csets
@@ -184,7 +190,7 @@ qualifyClassDefaults errh symt ds =
                         -- substitute into the clauses
                         fdefaults' = cSubstN (tmap,cmap,vmap,M.empty) fdefaults
                     in  (CField fi fps fqt fdefaults' foqt)
-            in  (Cclass incoh cps ik is deps (map qualField fs))
+            in  (Cclass incoh cps ik is deps ats (map qualField fs))
         qualDef d = d
     in
         map qualDef ds

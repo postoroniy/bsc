@@ -17,7 +17,7 @@ import TCMisc
 import SymTab
 import MakeSymTab(convCQTypeWithAssumps)
 import VModInfo(VArgInfo(..))
-import Util(concatMapM)
+import Util(concatMapM, fst3)
 
 import Debug.Trace(traceM)
 import IOUtil(progArgs)
@@ -26,14 +26,14 @@ doTraceCtxReduce :: Bool
 doTraceCtxReduce = "-trace-ctxreduce" `elem` progArgs
 
 cCtxReduceIO :: ErrorHandle -> Flags -> SymTab -> CPackage -> IO CPackage
-cCtxReduceIO errh flags s (CPackage mi exps imps fixs ds includes) = do
+cCtxReduceIO errh flags s (CPackage mi exps imps impsigs fixs ds includes) = do
     -- The False argument to 'runTI' indicates that incoherent instances should not be matched at this time
     -- We want to preserve those contexts to be handled in typecheck (XXX why?)
-    let (res, wmsgs) = runTI flags False s (mapM ctxRed ds)
+    let (res, wmsgs, _) = runTI flags False s (mapM ctxRed ds)
     when (not (null wmsgs)) $ bsWarning errh wmsgs
     case res of
       Left emsgs -> bsError errh emsgs
-      Right ds' -> return (CPackage mi exps imps fixs ds' includes)
+      Right ds' -> return (CPackage mi exps imps impsigs fixs ds' includes)
 
 cCtxReduceDef :: Flags -> SymTab -> CDefn -> Either [EMsg] CDefn
 cCtxReduceDef flags s def =
@@ -41,7 +41,7 @@ cCtxReduceDef flags s def =
     -- warnings better, return an ErrorMonad.
     -- The False argument to 'runTI' indicates that incoherent instances should not be matched at this time
     -- We want to preserve those contexts to be handled in typecheck (XXX why?)
-    case fst (runTI flags False s (ctxRed def)) of
+    case fst3 (runTI flags False s (ctxRed def)) of
     Left msgs -> Left msgs
     Right t   -> Right t
 
@@ -88,7 +88,7 @@ instance CtxRed CDefn where
         popBoundTVs  -- necessary after call to ctxRedCQType
         return (f { cforg_type = cqt' })
 
-    ctxRed d@(Cclass incoh cpreds ik vs fds fs) = do
+    ctxRed d@(Cclass incoh cpreds ik vs fds ats fs) = do
        -- get any kind information we have for the type parameters
        -- XXX is this necessary?
        let i = iKName ik
@@ -112,7 +112,7 @@ instance CtxRed CDefn where
                    Nothing -> ik
                    Just k' -> IdKind i k'
 -}
-       return (Cclass incoh cpreds ik vs fds fs')
+       return (Cclass incoh cpreds ik vs fds ats fs')
 
     ctxRed d = return d
 
@@ -381,13 +381,13 @@ ctxRedCQType' isInstHead cqt = do
 
     -- do extra reduction on instance heads to avoid synonym-expansion
     -- and SizeOf issues, without unduly disturbing non-instance types
-    -- (and do it here, after "convCQType", so that "expPrimTCons" sees
+    -- (and do it here, after "convCQType", so that "expTFun" sees
     -- the qualified types)
     (qs, t) <- if isInstHead
                then do -- XXX disable expanding of type synonyms until
                        -- XXX failures with TLM instances are resolved
-                       -- XXX (vqs_extra, t1) <- expPrimTCons t0 (expandSyn t0)
-                       (vqs_extra, t1) <- expPrimTCons t0
+                       -- XXX (vqs_extra, t1) <- expTFun t0 (expandSyn t0)
+                       (vqs_extra, t1) <- expTFun t0
                        let qs_extra = map toPredWithPositions vqs_extra
                        return (qs0 ++ qs_extra, t1)
                else return (qs0, t0)

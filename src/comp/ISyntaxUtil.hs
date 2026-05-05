@@ -19,6 +19,7 @@ import ISyntaxSubst(tSubst)
 import Wires
 import VModInfo(vFields, VFieldInfo(..), lookupOutputClockWires)
 import CType(TISort(..), StructSubType(..))
+import Changed
 
 --import Debug.Trace
 
@@ -319,16 +320,29 @@ iMkValid t e =
 iMkNil :: IType -> IExpr a
 iMkNil t = IAps icPrimChr [mkNumConT 1, itList t] [iMkLitSize 1 0]
 
+-- The Cons constructor's internal struct type, matching the frontend's
+-- anonymous struct (List_$Cons with fields _1, _2) from CParser.
+itListCons :: IType -> IType
+itListCons t =
+  let tc_id = mkTCId idList (idCons noPosition)
+      (id_1:id_2:_) = tupleIds
+      ti = TIstruct SStruct [id_1, id_2]
+  in  ITAp (ITCon tc_id (IKFun IKStar IKStar) ti) t
+
 iMkCons :: IType -> IExpr a -> IExpr a -> IExpr a
 iMkCons t e_hd e_tl =
   let a = take1tmpVarIds
       ic_ty = ITForAll a IKStar $
-              (ITVar a) `itFun` (itList (ITVar a)) `itFun` (itList (ITVar a))
+              itListCons (ITVar a) `itFun` (itList (ITVar a))
       cti = ConTagInfo { conNo = 1, numCon = 2, conTag = 1, tagSize = 1 }
       ic = ICon (idCons noPosition)
                 (ICCon { iConType = ic_ty, conTagInfo = cti })
-      -- multiple arguments become a single struct argument
-      e = iMkPairAt noPosition t (itList t) e_hd e_tl
+      (id_1:id_2:_) = tupleIds
+      tc_id = mkTCId idList (idCons noPosition)
+      tup_ty = ITForAll a IKStar $
+               (ITVar a) `itFun` itList (ITVar a) `itFun` itListCons (ITVar a)
+      tup = ICon tc_id (ICTuple tup_ty [id_1, id_2])
+      e = IAps tup [t] [e_hd, e_tl]
   in  IAps ic [t] [e]
 
 iMkList :: IType -> [IExpr a] -> IExpr a
@@ -892,6 +906,10 @@ itInst (ITForAll i _ t) (a:as) = itInst (tSubst i a t) as
 itInst t                []     = t
 itInst t                as     = internalError ("itInst: " ++ ppReadable (t, as))
 
+-- Instantiate and normalize (expand type synonyms and type functions)
+itInstNorm :: (IType -> IType) -> IType -> [IType] -> IType
+itInstNorm norm t ts = norm (itInst t ts)
+
 leftmost :: IType -> IType
 leftmost (ITAp t _) = leftmost t
 leftmost t = t
@@ -934,8 +952,8 @@ irulesMapM f (IRules sps rs) = do
 -- Similar to the routine in ISyntaxCheck, but with shortcuts to make
 -- it faster.
 
-iGetType :: IExpr a -> IType
-iGetType e0 =
+iGetTypeNorm :: (IType -> Changed IType) -> IExpr a -> IType
+iGetTypeNorm norm e0 =
     let iGetTypePrim _ PrimIf [t] [_,_,_] = t
         iGetTypePrim _ PrimConcat [_,_,ITNum n] [_,_] = itBitN n
         iGetTypePrim _ PrimMul [_,_,ITNum n] [_,_] = itBitN n
@@ -963,7 +981,7 @@ iGetType e0 =
                 isNRes PrimSRL = True
                 isNRes PrimSRA = True
                 isNRes _       = False
-        iGetTypePrim e _ _ _ = tCheck emptyEnv e
+        iGetTypePrim e _ _ _ = changedOrId norm $ tCheck emptyEnv e
 
         tCheck r (ILam i t e) =
                 itFun t (tCheck (addT i t r) e)
@@ -973,7 +991,8 @@ iGetType e0 =
                 ITForAll i _ rt -> tSubst i t rt
                 tt -> internalError ("iGetType.tCheck: " ++ ppString (e0, e, tt, t))
         tCheck r (IAps f (t:ts) []) = tCheck r (IAps (IAps f [t] []) ts [])
-        tCheck r (IAps f ts es) = dropArrows (length es) (tCheck r (IAps f ts []))
+        tCheck r (IAps f ts es) =
+          dropArrows (length es) (changedOrId norm $ tCheck r (IAps f ts []))
         tCheck r (IVar i) = findT i r
         tCheck r (ILAM i k e) = ITForAll i k (tCheck r e)
         tCheck r (ICon c ic) = iConType ic
@@ -994,7 +1013,10 @@ iGetType e0 =
         (ICon c ic) -> iConType ic
         e@(IAps (ICon _ (ICPrim _ p)) ts es) -> iGetTypePrim e p ts es
         -- General
-        e -> tCheck emptyEnv e
+        e -> changedOrId norm $ tCheck emptyEnv e
+
+iGetType :: IExpr a -> IType
+iGetType = iGetTypeNorm $ \ _ -> Unchanged
 
 -- input must be an interface type
 iGetIfcName :: IType -> Id
@@ -1092,9 +1114,6 @@ getStateVarNames (ILAM _ _ e) = getStateVarNames e
 getStateVarNames (ICon i (ICStateVar {})) = [i]
 getStateVarNames (IAps f _ es) = concatMap getStateVarNames (f:es)
 getStateVarNames _ = []
-
-iTSizeOf :: IType
-iTSizeOf = ITCon idSizeOf (IKStar `IKFun` IKNum) tiSizeOf
 
 iTLog, iTAdd, iTMax, iTMin, iTMul, iTDiv :: IType
 iTLog = ITCon idTLog (IKNum `IKFun` IKNum) TIabstract

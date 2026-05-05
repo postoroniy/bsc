@@ -33,7 +33,7 @@ import Data.Generics (listify)
 import qualified Data.Map as M
 
 -- Bluespec imports
-import Util(quote, concatMapM, concatUnzip3, lastOrErr, fromJustOrErr,
+import Util(quote, concatMapM, concatUnzip3, lastOrErr, fromJustOrErr, fst3,
             thd, readOrErr)
 import IOUtil(getEnvDef)
 
@@ -85,7 +85,7 @@ import TypeAnalysisTclUtil
 
 import ABin
 import ABinUtil
-import BinUtil(BinMap, BinFile, HashMap, readBin, sortImports)
+import BinUtil(BinMap, BinFile, HashMap, readBin, sortImportedSignatures)
 import ForeignFunctions(ForeignFuncMap)
 import SimPrimitiveModules(isPrimitiveModule)
 import SimCCBlock(SimCCBlock(..), primBlocks)
@@ -194,7 +194,7 @@ initState =
             , tp_binmap   = M.empty
             , tp_hashmap  = M.empty
             , tp_symtab   = emptySymtab
-            , tp_cpack    = (CPackage pid (Right []) [] [] [] [])
+            , tp_cpack    = (CPackage pid (Right []) [] [] [] [] [])
             , tp_mods     = Nothing
             , tp_packView = initExpandInfoBag
             , tp_modView  = initExpandInfoBag
@@ -245,9 +245,9 @@ getImportsSorted = do
 getImportNamesSorted :: IO [String]
 getImportNamesSorted = do
   g <- readIORef globalVar
-  let (CPackage _ _ cimps _ _ _) = tp_cpack g
+  let (CPackage _ _ _ impsigs _ _ _) = tp_cpack g
       -- report the packages in reverse dependency order
-      imp_names = reverse $ [ iname | (CImpSign iname _ _) <- cimps ]
+      imp_names = reverse $ [ iname | (CImpSign iname _ _) <- impsigs ]
   return imp_names
 
 -- -----
@@ -643,12 +643,12 @@ tclPackage ("load":args) = do
                  in  map lookupFn ps_read
 
   -- update the CImports and symbol table
-  let (CPackage pid exps cimps cf defs incs) = tp_cpack g
+  let (CPackage pid exps cimps impsigs cf defs incs) = tp_cpack g
       mkCImp (_, _, bo_sig, (IPackage iid _ _ _), _) =
           -- XXX is False OK here?
           CImpSign (getIdString iid) False bo_sig
-      cimps' = sortImports ((map mkCImp bininfos) ++ cimps)
-      cpack' = CPackage pid exps cimps' cf defs incs
+      impsigs' = sortImportedSignatures ((map mkCImp bininfos) ++ impsigs)
+      cpack' = CPackage pid exps cimps impsigs' cf defs incs
   symtab <- mkSymTab globalErrHandle cpack'
 
   -- write back the new values
@@ -680,7 +680,7 @@ tclPackage ["depend"] = do
   return $ TLst (map mkDep imps)
 ----------
 tclPackage ["clear"] = do
-  let clrCPkg (CPackage pid _ _ _ _ _) = (CPackage pid (Right []) [] [] [] [])
+  let clrCPkg (CPackage pid _ _ _ _ _ _) = (CPackage pid (Right []) [] [] [] [] [])
   modifyIORef globalVar (\gv -> gv { tp_binmap  = M.empty,
                                      tp_hashmap = M.empty,
                                      tp_symtab  = emptySymtab,
@@ -747,10 +747,10 @@ tclPackage xs = internalError $ "tclPackage: grammar mismatch: " ++ (show xs)
 -- Create a new CPackage after package load
 addNewImports :: [(CSignature, IPackage a, String, String)] ->
                  CPackage -> CPackage
-addNewImports ims (CPackage pid exps imps cf defs incs) =
-    (CPackage pid exps imps' cf defs incs)
-    where imps' = imps ++ map addOneImport ims
-          addOneImport :: (CSignature, IPackage a, String, String) -> CImport
+addNewImports ims (CPackage pid exps imps impsigs cf defs incs) =
+    (CPackage pid exps imps impsigs' cf defs incs)
+    where impsigs' = impsigs ++ map addOneImport ims
+          addOneImport :: (CSignature, IPackage a, String, String) -> CImportedSignature
           addOneImport (cs, (IPackage iid _ _ _), _, _) =
               -- XXX Bool var for qual names?
               CImpSign (getIdString iid) False cs
@@ -969,7 +969,7 @@ lookupAndShowTypeInfo :: SymTab -> Id -> Either [EMsg] String
 lookupAndShowTypeInfo symtab tid =
           case (findType symtab tid) of
             Nothing -> Left [(cmdPosition,EUnboundTyCon (pfpString tid))]
-            Just (TypeInfo _ kind vs tis) -> Right (showType False tid kind vs)
+            Just (TypeInfo _ kind vs tis _) -> Right (showType False tid kind vs)
 
 
 ----------------------------------------------------
@@ -2629,6 +2629,7 @@ simGrammar = (tclcmd "sim" namespace helpStr "") .+.
                     , lookupGrammar, lsGrammar, nextEdgeGrammar, pwdGrammar
                     , runGrammar, runToGrammar
                     , stepGrammar, stopGrammar, syncGrammar, timeGrammar
+                    , isFatalGrammar
                     , timescaleGrammar
                     , unloadGrammar, upGrammar, vcdGrammar, verGrammar
                     ])
@@ -2671,6 +2672,7 @@ simGrammar = (tclcmd "sim" namespace helpStr "") .+.
           stopGrammar = kw "stop" "Stop a running simulation" ""
           syncGrammar = kw "sync" "Wait for simulator execution to complete" ""
           timeGrammar = kw "time" "Display current simulation time" ""
+          isFatalGrammar = kw "isfatal" "Return whether the last termination was caused by $fatal" ""
           timescaleGrammar = (kw "timescale" "Specify simulation timescale" "") .+.
                              (arg "timescale" StringArg "simulation timescale (Verilog-format)")
           unloadGrammar = kw "unload" "Unload the current bluesim model" ""
@@ -2887,6 +2889,13 @@ tclSim ("run":args) = do
                   -- advance with no pre-set limit
                   _ <- bk_advance bs (args == ["async"])
                   return $ TLst []
+    Nothing -> ioError $ userError ("There is no bluesim model loaded")
+----------
+tclSim ["isfatal"] = do
+  g <- readIORef globalVar
+  case (tp_bluesim g) of
+    Just bs -> do fatal <- bk_fataled bs
+                  return $ if fatal then TStr "1" else TStr "0"
     Nothing -> ioError $ userError ("There is no bluesim model loaded")
 ----------
 tclSim ("runto":time:args) = do
@@ -4184,8 +4193,8 @@ tclDepend ["file",fname]= do
 --
 tclDepend ["recomp",fname]= do
     flags <- getGFlags
-    fnames <- chkDeps globalErrHandle flags fname
-    return $ toHTObj fnames
+    pkgs <- chkDeps globalErrHandle flags fname
+    return $ toHTObj (map fst3 pkgs)
 
 tclDepend xs = internalError $ "tclDepend: grammar mismatch: " ++ (show xs)
 
